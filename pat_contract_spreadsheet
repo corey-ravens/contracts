@@ -1,0 +1,226 @@
+
+
+
+
+/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Create a table that notes early cash. Like Flacco in 2012, that cash was really for 2013 but was paid before end of league year.
+
+TEMP TABLES:
+	#temp_early_cash
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+-- Check if #temp_signing_bonus_lag exists, if it does drop it
+IF OBJECT_ID('tempdb..#temp_signing_bonus_lag') IS NOT NULL
+	DROP TABLE #temp_signing_bonus_lag
+
+	SELECT PlayerID AS nfl_player_id
+			,cap.Season AS season
+			,cap.Season + 1 AS season_to_move_cash_to
+			,ClubID AS nfl_club_id
+			,LAG(ClubID) OVER (PARTITION BY PlayerID, ClubID ORDER BY cap.Season, COALESCE(ToDate,'12/31/2099')) as nfl_club_id_previous
+			,FromDate AS from_date
+			,ToDate AS to_date
+			,regular_season_end
+			,LAG(CashSB_SB) OVER (PARTITION BY PlayerID, ClubID ORDER BY cap.Season, COALESCE(ToDate,'12/31/2099')) as signing_bonus_previous_record
+			,CashSB_SB AS signing_bonus
+			,LAG(CashSB_Option) OVER (PARTITION BY PlayerID, ClubID ORDER BY cap.Season, COALESCE(ToDate,'12/31/2099')) as option_bonus_previous_record
+			,CashSB_Option AS option_bonus
+			,LAG(CashLTBE_RB) OVER (PARTITION BY PlayerID, ClubID ORDER BY cap.Season, COALESCE(ToDate,'12/31/2099')) as roster_bonus_previous_record
+			,CashLTBE_RB AS roster_bonus
+	INTO #temp_signing_bonus_lag
+	FROM ClubDB.dbo.CapRollup cap
+	INNER JOIN Analytics.dbo.map_nfl_league_year_dates ld
+		ON cap.Season = ld.season
+	WHERE cap.Season >= 2011
+	ORDER BY PlayerID
+		,Season
+
+-- Check if #temp_early_cash exists, if it does drop it
+IF OBJECT_ID('tempdb..#temp_early_cash') IS NOT NULL
+	DROP TABLE #temp_early_cash
+
+	SELECT nfl_player_id
+			,season
+			,season_to_move_cash_to
+			,nfl_club_id
+			,from_date
+			,to_date
+			,signing_bonus - signing_bonus_previous_record AS early_cash_signing_bonus
+			,option_bonus - option_bonus_previous_record AS early_cash_option_bonus
+			,roster_bonus - roster_bonus_previous_record AS early_cash_roster_bonus
+	INTO #temp_early_cash
+	FROM #temp_signing_bonus_lag
+	WHERE from_date >= regular_season_end
+		AND ((signing_bonus - signing_bonus_previous_record) > 0
+			OR (option_bonus - option_bonus_previous_record) > 0
+			OR (roster_bonus - roster_bonus_previous_record) > 0)
+		AND nfl_club_id_previous = nfl_club_id
+
+
+/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Create a contract year rep temp table. Create a contract year variable that you can pivot on in the next step.
+
+You make two adjustements to calculate real annual compensation:  add in early cash and subtract out "fake" 
+offseason compensation (for example Drew Brees contract id 227396 has Annual Offseason of $3,650 for 2018,
+but his contract summary has $0 for total_offseason - you want this to be $0 in the annual comp number).
+
+TEMP TABLES:
+	#temp_contract_year_rep
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+-- Check if #temp_contract_year_rep exists, if it does drop it
+IF OBJECT_ID('tempdb..#temp_contract_year_rep') IS NOT NULL
+	DROP TABLE #temp_contract_year_rep
+
+	SELECT co.nfl_contract_id
+		,cyr.season
+		,RANK() OVER (PARTITION BY ContractID ORDER BY cyr.season) AS contract_year
+		,cyr.AnnualComp
+			+ ISNULL(ec.early_cash_option_bonus,0)
+			+ ISNULL(ec.early_cash_roster_bonus,0) 
+			- CASE WHEN cyr.AnnualOffSeason < 10000 THEN cyr.AnnualOffSeason ELSE 0 END
+		AS annual_compensation
+	INTO #temp_contract_year_rep
+	FROM ClubDB.dbo.ContractYearRep cyr
+	INNER JOIN [Analytics].[dbo].[analysis_players_contracts] co
+		ON cyr.ContractID = co.nfl_contract_id
+		AND cyr.season >= CASE WHEN co.signing_type IN ('Extension') AND co.true_extension = 1 THEN co.first_new_year ELSE co.first_contract_year END
+		AND cyr.season <= last_contract_year
+	LEFT JOIN #temp_early_cash ec
+		ON co.nfl_player_id = ec.nfl_player_id
+		AND co.nfl_club_id = ec.nfl_club_id
+		AND co.signing_date = ec.from_date
+		AND cyr.Season = ec.season_to_move_cash_to
+
+/*
+select *
+from #temp_contract_year_rep
+where nfl_contract_id = 232465
+*/
+
+/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Pivot the contract year rep table so you have the annual P5 for each year in the contract.
+
+
+TEMP TABLES:
+	#temp_contract_year_rep_pivot
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+-- Check if #temp_contract_year_rep_pivot exists, if it does drop it
+IF OBJECT_ID('tempdb..#temp_contract_year_rep_pivot') IS NOT NULL
+	DROP TABLE #temp_contract_year_rep_pivot
+
+	SELECT nfl_contract_id
+		,[1] AS compensation_year_1
+		,[2] AS compensation_year_2
+		,[3] AS compensation_year_3
+		,[4] AS compensation_year_4
+		,[5] AS compensation_year_5
+		,[6] AS compensation_year_6
+		,[7] AS compensation_year_7
+	INTO #temp_contract_year_rep_pivot
+	FROM (
+	SELECT nfl_contract_id
+		,contract_year
+		,annual_compensation
+	FROM #temp_contract_year_rep WHERE contract_year IN (1,2,3,4,5,6,7)) up
+	PIVOT (MAX(annual_compensation) FOR contract_year IN ([1],[2],[3],[4],[5],[6],[7])) AS pvt
+	WHERE 1 = 1
+	ORDER BY nfl_contract_id
+	
+
+/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Sum up all the money guaranteed at signing.
+
+TEMP TABLES:
+#temp_guaranteed_money_excl_singing_bonus
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+-- Check if #temp_guaranteed_money_by_year exists, if it does drop it
+IF OBJECT_ID('tempdb..#temp_guaranteed_money_by_year') IS NOT NULL
+	DROP TABLE #temp_guaranteed_money_by_year
+
+	SELECT ContractID AS nfl_contract_id
+		,Season AS season
+		,SUM(GuaranteeAmt) AS guaranteed_amount 
+	INTO #temp_guaranteed_money_by_year
+	FROM ClubDB.dbo.SectionYearRep
+	WHERE Guarantee = 1
+	GROUP BY ContractID
+		,Season
+
+-- Check if #temp_guaranteed_money_excl_singing_bonus exists, if it does drop it
+IF OBJECT_ID('tempdb..#temp_guaranteed_money_excl_singing_bonus') IS NOT NULL
+	DROP TABLE #temp_guaranteed_money_excl_singing_bonus
+
+	SELECT cy.nfl_contract_id
+		,SUM(CASE WHEN contract_year = 1 AND annual_compensation > ISNULL(guaranteed_amount,0) THEN annual_compensation ELSE ISNULL(guaranteed_amount,0) END) AS guaranteed_money 
+	INTO #temp_guaranteed_money_excl_singing_bonus
+	FROM #temp_contract_year_rep cy
+	LEFT JOIN #temp_guaranteed_money_by_year gm
+		ON cy.nfl_contract_id = gm.nfl_contract_id
+		AND cy.season = gm.season
+	GROUP BY cy.nfl_contract_id
+
+/*
+select *
+from #temp_guaranteed_money_excl_singing_bonus
+where nfl_contract_id = 229537
+order by season
+*/
+
+/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Join the pivoted annual P5 table and the guaranteed money table to the contract headline 
+numbers table to create Pat's contract breakdown spreadsheet.
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	SELECT cl.code AS team
+		,co.nfl_contract_id
+		,[player]
+		,CASE WHEN signing_type IN ('Extension') THEN last_contract_year - first_new_year + 1 ELSE total_years END AS contract_length
+		,[signing_date]
+		,[signing_type]
+		,[true_signing_bonus]
+		,compensation_year_1
+		,compensation_year_2
+		,compensation_year_3
+		,compensation_year_4
+		,compensation_year_5
+		--,compensation_year_6
+		--,compensation_year_7
+		,[true_average_per_year]
+		,[true_package_amount]  
+		,RANK() OVER (PARTITION BY po.translation ORDER BY true_average_per_year DESC) AS contract_rank
+		,pl.birth_date
+		,co.total_guaranteed_at_signing
+	FROM [Analytics].[dbo].[analysis_players_contracts_NEW] co
+	INNER JOIN BaneProductionAnalytics.dbo.players pl
+		ON co.nfl_player_id = pl.nfl_id
+		AND pl.is_deleted = 0
+	INNER JOIN BaneProductionAnalytics.dbo.clubs cl
+		ON co.nfl_club_id = cl.nfl_club_id
+		AND cl.is_disabled = 0
+	INNER JOIN BaneProductionAnalytics.dbo.positions po
+		ON pl.position_id = po.id
+	LEFT JOIN #temp_contract_year_rep_pivot pv
+		ON co.nfl_contract_id = pv.nfl_contract_id
+	--LEFT JOIN #temp_guaranteed_money_excl_singing_bonus gm
+		--ON co.nfl_contract_id = gm.nfl_contract_id
+	INNER JOIN BaneProductionAnalytics.dbo.statuses st
+		ON pl.status_id = st.id
+	WHERE most_recent_new_money = 1
+		AND st.description_short IN ('Active','Inactive','R/Injured')
+		AND signing_type NOT IN ('Reserve/Future FA Signing','Practice Squad','Practice Squad Exception','Signed MS Tender Prior to Contract Expiring','Reserve/Future')
+		AND po.translation IN ('DS')
+	ORDER BY true_average_per_year DESC
+
