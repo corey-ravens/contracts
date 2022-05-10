@@ -1,0 +1,79 @@
+
+
+
+
+/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Procedure Name:	analysis_players_similarity_finder
+Author:			Corey Krawiec
+Creation Date:	12/23/2019
+Description:       
+
+	This program is for creating the top 10 most similar players for contract APY projections
+		
+	
+Input Parameters:
+	None
+	
+Output Parameters:
+	None 
+
+Modifications:
+Date		SE				Description
+
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+
+/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	(1) 
+
+
+	Create a master transactions table with bane club ids
+
+	OUTPUT TABLES:
+	#temp_transactions
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_transactions exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_transactions') IS NOT NULL
+		DROP TABLE #temp_transactions
+
+	SELECT transid AS transaction_id
+		,PlayerID AS nfl_player_id
+		,dtLoadDate AS load_date
+		,Season AS season
+		,TransactionDate AS transaction_date
+		,ToDate AS to_date
+		,OrderBy AS order_by
+		,TransactionDesc AS transaction_description
+		,TransactionDescAbbr AS transaction_abbreviation
+		,TransStatus AS transaction_status
+		,InitialTransStatusDescAbbr AS initial_status_abbreviation
+		,InitialTransStatusShortDesc AS initial_status_description_short
+		,InitialTransStatusDesc AS initial_status_description
+		,ResultTransStatusDescAbbr AS result_status_abbreviation
+		,ResultTransStatusShortDesc AS result_status_description_short
+		,ResultTransStatusDesc AS result_status_description
+		,PcmsContractID AS pcms_contract_id
+		,Comments1 AS comments_1
+		,Comments2 AS comments_2	
+		,sc.nfl_club_id AS start_nfl_club_id
+		,rc.nfl_club_id AS result_nfl_club_id
+		,pc.nfl_club_id AS potential_nfl_club_id	
+		,potentialClubAbbr 
+	INTO #temp_transactions
+	FROM ProDB.dbo.TransactionTable tt
+	LEFT JOIN BaneProductionAnalytics.dbo.clubs rc
+		ON LTRIM(RTRIM(tt.ResultClubAbbr)) = LTRIM(RTRIM(rc.code))
+	LEFT JOIN BaneProductionAnalytics.dbo.clubs sc
+		ON LTRIM(RTRIM(tt.StartClubAbbr)) = LTRIM(RTRIM(sc.code))
+	LEFT JOIN BaneProductionAnalytics.dbo.clubs pc
+		ON LTRIM(RTRIM(tt.PotentialClubAbbr)) = LTRIM(RTRIM(pc.code))
+	WHERE 1=1
+		AND LeagueType = 'NFL'
+		AND TransStatus = 30
+	ORDER BY PlayerID
+		,OrderBy DESC
