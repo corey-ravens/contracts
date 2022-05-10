@@ -1,0 +1,203 @@
+
+
+
+
+	SELECT DISTINCT SigningType
+	INTO #temp_signing_types
+	FROM ClubDB.dbo.ContractRep
+	WHERE SignDate >= '12/1/2013' -- only contracts from new Contract Wizard
+
+
+	SELECT CG.PlayerID
+		,C.SignDate
+		,TS.SectionType
+		,TS.SectionTitle
+		--,TC.Club_Code
+		,CG.Offset
+		,CG.DefaultLanguage
+		,CG.Season
+		,CG.EventID
+		,CG.SectionID
+		,CG.ClubID
+		,CG.Season
+		,C.SignDate
+		,CG.ChangeDate
+		,CASE WHEN TS.SectionType IN ('Deion Rule', 'PF', 'Signing Bonus') THEN 'SB'
+			WHEN TS.SectionType  IN ('P5', 'Salary Advance','Option') THEN 'Para 5'
+			WHEN TS.SectionType IN ('Off-Season','Roster Bonus','Incentive','Other Terms','Reporting Bonus','LTBE') THEN 'LTBE' 	
+			WHEN TS.SectionType IN ('Grievance', 'Termination Pay','Injury Settlement','Misc', 'PCMS Misc', 'Other Compensation') THEN 'Misc'	
+		END AS 'Category'
+		,TS.SectionType + ' - ' + TS.SectionTitle AS 'SectionDisplay'
+		,SUM(Guar_Skill) AS 'Skill'
+		,SUM(Guar_Injury) AS 'Injury'
+		,SUM(Guar_Cap) AS 'Cap'
+		,SUM(Guar_Max) AS 'Total'
+		,CG.Offset
+		,CG.DefaultLanguage
+	--INTO #temp_on_execution
+	FROM ClubDB.dbo.CapGuarantee CG
+	INNER JOIN ClubDB.dbo.ContractRep C 
+		ON CG.ContractID = C.ContractID
+	INNER JOIN #temp_signing_types ST
+		ON C.SigningType = ST.SigningType
+	--INNER JOIN ClubDB.dbo.Club TC 
+		--ON TC.Season = @StartSeason and TC.ClubID = CG.ClubID
+	INNER JOIN ClubDB.dbo.PlayerExtract tpe  
+		ON tpe.PlayerID = CG.PlayerID
+	INNER JOIN ClubDB.dbo.SectionYearRep TS 
+		ON TS.SectionID = CG.SectionID and TS.ClauseType is null
+	INNER JOIN ProDB.dbo.TransactionTable T
+		ON T.TransID = C.TransID
+	WHERE PotentialGuarantee = 0 -- on execution
+	GROUP BY CG.PlayerID
+		,C.SignDate
+		,TS.SectionType
+		,TS.SectionTitle
+		--,TC.Club_Code
+		,CG.Offset
+		,CG.DefaultLanguage
+		,CG.Season
+		,CG.EventID
+		,CG.SectionID
+		,CG.ClubID
+		,CG.Season
+		,C.SignDate
+		,CG.ChangeDate
+
+
+
+
+
+
+
+
+	SELECT CG.PlayerID
+		,C.SignDate
+		,TS.SectionType
+		,TS.SectionTitle
+		,CG.Offset
+		,CG.DefaultLanguage
+		,CG.Season
+		,CG.EventID
+		,CG.SectionID
+		,CG.ClubID
+		,CG.ChangeDate
+		,CASE WHEN TS.SectionType IN ('Deion Rule', 'PF', 'Signing Bonus') THEN 'SB'
+			WHEN TS.SectionType  IN ('P5', 'Salary Advance','Option') THEN 'Para 5'
+			WHEN TS.SectionType IN ('Off-Season','Roster Bonus','Incentive','Other Terms','Reporting Bonus','LTBE') THEN 'LTBE' 	
+			WHEN TS.SectionType IN ('Grievance', 'Termination Pay','Injury Settlement','Misc', 'PCMS Misc', 'Other Compensation') THEN 'Misc'	
+		END 'Category'
+		,TS.SectionType + ' - ' + TS.SectionTitle 'SectionDisplay'
+		,SUM(Guar_Skill) 'Skill'
+		,SUM(Guar_Injury) 'Injury'
+		,SUM(Guar_Cap) 'Cap'
+		,SUM(Guar_Max) 'Total'
+		,CG.Offset
+		,CG.DefaultLanguage
+		,(SELECT TOP 1 ContractID FROM SectionYearRep WHERE SectionID = CG.SectionID and ClauseType is null) AS 'ContractID'
+	--INTO #temp_current
+	FROM CapGuarantee CG
+	INNER JOIN ContractRep C 
+		ON CG.ContractID = C.ContractID
+	INNER JOIN #temp_signing_types ST
+		ON C.SigningType = ST.SigningType
+	INNER JOIN PlayerExtract tpe  
+		ON tpe.PlayerID = CG.PlayerID
+	INNER JOIN SectionYearRep TS 
+		ON TS.SectionID = CG.SectionID
+		AND TS.ClauseType IS NULL
+	WHERE Effective = 1
+	GROUP BY CG.PlayerID
+		,C.SignDate
+		,TS.SectionType
+		,TS.SectionTitle
+		,CG.Offset
+		,CG.DefaultLanguage
+		,CG.Season
+		,CG.EventID
+		,CG.SectionID
+		,CG.ClubID
+		,CG.ChangeDate
+
+
+select *
+from CapGuarantee
+where PlayerID = 42401
+	and Effective = 1
+	--AND OrderBy
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	Create a table that has future guaranteed cap money.
+
+	TEMP TABLES:
+	#temp_future_guaranteed_money
+
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_cap_guarantee exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_cap_guarantee') IS NOT NULL
+		DROP TABLE #temp_cap_guarantee
+
+	SELECT *
+		,CASE WHEN LEAD(ContractID,1) OVER (PARTITION BY PlayerID, Season, ClubID ORDER BY ChangeDate, ContractID, SectionID) <> ContractID THEN LEAD(ChangeDate,1) OVER (PARTITION BY PlayerID, cg.Season, ClubID ORDER BY ChangeDate, ContractID, SectionID) ELSE ToDate END AS to_date
+	INTO #temp_cap_guarantee
+	FROM ClubDB.dbo.CapGuarantee cg
+
+
+	-- Check if #temp_guaranteed_minus_earned exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_guaranteed_minus_earned') IS NOT NULL
+		DROP TABLE #temp_guaranteed_minus_earned
+
+	SELECT PlayerID AS nfl_player_id
+	      ,cg.Season AS season
+		  ,ClubID AS nfl_club_id
+		  ,cg.ContractID AS nfl_contract_id
+		  ,ChangeDate AS from_date
+		  ,to_date
+		  ,SUM(CASE WHEN COALESCE(Amount,0) >= Guar_Cap THEN 0 ELSE Guar_Cap - COALESCE(Amount,0) END) AS guaranteed_cap
+	INTO #temp_guaranteed_minus_earned
+	FROM #temp_cap_guarantee cg
+	LEFT JOIN ClubDB.dbo.SectionYearEventRep sr
+		ON cg.SectionID = sr.SectionID
+		AND cg.Season = sr.Season
+	WHERE Effective = 1
+		AND cg.Season >= 2011
+		AND cg.Guar_Cap > 0
+		AND ChangingSectionID = 0
+	GROUP BY PlayerID
+		,cg.Season
+		,ClubID
+		,cg.ContractID 
+		,ChangeDate
+		,to_date
+
+
+	-- Check if #temp_future_guaranteed_money exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_future_guaranteed_money') IS NOT NULL
+		DROP TABLE #temp_future_guaranteed_money
+
+	SELECT nfl_player_id
+	      ,season
+		  ,nfl_club_id
+		  ,nfl_contract_id
+		  ,from_date
+		  ,to_date
+		  ,(SELECT SUM(guaranteed_cap)
+		      FROM #temp_guaranteed_minus_earned gm2
+			 WHERE gm2.nfl_player_id = gm1.nfl_player_id
+			   AND gm2.nfl_club_id = gm1.nfl_club_id
+			   AND COALESCE(gm2.from_date,'12/31/2099') = COALESCE(gm1.from_date,'12/31/2099')
+			   AND COALESCE(gm2.to_date,'12/31/2099') = COALESCE(gm1.to_date,'12/31/2099')
+			   AND gm2.nfl_contract_id = gm1.nfl_contract_id
+			   AND gm2.season >= gm1.season) 
+		    AS future_guaranteed_money
+	INTO #temp_future_guaranteed_money
+	FROM #temp_guaranteed_minus_earned gm1
+
+/*
+SELECT *
+FROM #temp_future_guaranteed_money
+WHERE nfl_player_id = 37078
+*/
