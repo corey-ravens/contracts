@@ -23,6 +23,9 @@ Date         SE           Description
 
 
 DECLARE @iSeason INT = 2020
+DECLARE @draft_date DATE = (SELECT calendardate FROM ClubDB.dbo.calendar WHERE season = @iSeason AND [description] = 'Draft - Day 1')
+
+
 
 /*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -43,10 +46,10 @@ IF OBJECT_ID('tempdb..#temp_draft_contract_list') IS NOT NULL
 		,cl.code AS selection_team
 		,PlayerID AS nfl_player_id
 		,CONCAT(Player_LastName,', ',Player_FootballName) AS player
-		,CASE WHEN cr.Agent_LastName IS NULL THEN '' ELSE CONCAT(cr.Agent_LastName,', ',cr.Agent_FirstName) END AS agent
 		,translation AS position
 		,cr.ContractID AS contract_id
 		,SignDate AS sign_date
+		,CASE WHEN cr.Agent_LastName IS NULL THEN '' ELSE CONCAT(cr.Agent_LastName,', ',cr.Agent_FirstName) END AS agent
 		,FirstContractYear AS first_season
 		--,EffectiveLastContractYear - FirstContractYear + 1 AS contract_years
 		,4 AS contract_years
@@ -130,6 +133,293 @@ IF OBJECT_ID('tempdb..#temp_yearly_salary_pivot') IS NOT NULL
 
 /*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
+Get the Year One Rookie Allowances
+
+OUTPUT TABLES:
+#temp_yoras
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+  -- Check if# #temp_yoras exists, if it does drop it
+IF OBJECT_ID('tempdb..#temp_yoras') IS NOT NULL
+	DROP TABLE #temp_yoras
+
+	SELECT [Season] AS draft_year
+		,[Overall] AS draft_number
+		,[YearOneAllocation] AS year_one_rookie_allocation
+		,[YearOneMinAllocation] AS year_one_minimum_allocation
+	INTO #temp_yoras
+	FROM [NonProDB].[dbo].[RookiePool]
+
+	INSERT INTO #temp_yoras
+	SELECT *
+		,0
+	FROM Analytics.dbo.map_year_one_rookie_allocations
+
+
+/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Get the yearly minimum salaries for everyone in the draft class
+
+OUTPUT TABLES:
+#temp_pivot_yearly_minimums
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+  -- Check if #temp_yearly_minimums exists, if it does drop it
+IF OBJECT_ID('tempdb..#temp_yearly_minimums') IS NOT NULL
+	DROP TABLE #temp_yearly_minimums
+
+	SELECT @iSeason AS first_season
+		,CASE WHEN Season = @iSeason THEN 1
+			WHEN Season = @iSeason + 1 THEN 2
+			WHEN Season = @iSeason + 2 THEN 3
+			WHEN Season = @iSeason + 3 THEN 4
+			ELSE NULL
+		END AS season_in_league
+		,Para5
+	INTO #temp_yearly_minimums
+	FROM ClubDB.dbo.CapRollup
+	WHERE FromDate = @draft_date
+		AND PlayerID = (SELECT nfl_id FROM BaneProductionAnalytics.dbo.players WHERE draft_year = @iSeason AND draft_number = 1)
+
+
+-- Check if #temp_pivot_yearly_minimums exists, if it does drop it
+IF OBJECT_ID('tempdb..#temp_pivot_yearly_minimums') IS NOT NULL
+	DROP TABLE #temp_pivot_yearly_minimums
+
+	SELECT first_season 
+		,[1] AS season_1_minimum
+		,[2] AS season_2_minimum
+		,[3] AS season_3_minimum
+		,[4] AS season_4_minimum
+	INTO #temp_pivot_yearly_minimums
+	FROM (
+	SELECT first_season
+		,season_in_league
+		,Para5
+	FROM #temp_yearly_minimums) up
+	PIVOT (MAX(Para5) FOR season_in_league IN ([1],[2],[3],[4])) AS pvt
+	WHERE 1 = 1
+
+
+/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Find Signing Bonus PLUS other amounts "treated as Signing Bonus." Sometimes future Roster Bonus are treated as signing bonus for cap purposes, so use the cap table to
+find out how much is prorated at time of signing, sum that all, and then that will be the "amount treated as signing bonus."  Example: Gareon Conley in 2017
+
+OUTPUT TABLES:
+#temp_cap_signing_bonuses
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+  -- Check if #temp_cap_signing_bonuses exists, if it does drop it
+IF OBJECT_ID('tempdb..#temp_cap_signing_bonuses') IS NOT NULL
+	DROP TABLE #temp_cap_signing_bonuses
+
+	SELECT dc.nfl_player_id
+		,SUM(SB) AS cap_signing_bonus
+	INTO #temp_cap_signing_bonuses
+	FROM #temp_draft_contract_list dc
+	INNER JOIN ClubDB.dbo.CapRollup cr
+		ON dc.nfl_player_id = cr.PlayerID
+		AND dc.sign_date = cr.FromDate
+	WHERE Season <= @iSeason + 3
+	GROUP BY dc.nfl_player_id
+
+
+/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Find the amounts using the Section Year Rep table so you can subtract them from the "salary increase" calculations, because those have already been counted as 
+signing bonus so you have to remove them.
+
+OUTPUT TABLES:
+#temp_already_counted_bonuses
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+  -- Check if #temp_already_counted_bonuses exists, if it does drop it
+IF OBJECT_ID('tempdb..#temp_already_counted_bonuses') IS NOT NULL
+	DROP TABLE #temp_already_counted_bonuses
+
+	SELECT ContractID
+		,CASE WHEN Season = @iSeason THEN 1
+			WHEN Season = @iSeason + 1 THEN 2
+			WHEN Season = @iSeason + 2 THEN 3
+			WHEN Season = @iSeason + 3 THEN 4
+			ELSE NULL
+		END AS season_in_league
+		,SUM(TotalProrateAmt) AS amount_treated_as_signing_bonus
+	INTO #temp_already_counted_bonuses
+	FROM ClubDB.dbo.SectionYearRep sr
+	WHERE SectionType <> 'Signing Bonus'
+		AND Guarantee = 1
+		AND Prorate = 1
+	GROUP BY ContractID
+		,CASE WHEN Season = @iSeason THEN 1
+			WHEN Season = @iSeason + 1 THEN 2
+			WHEN Season = @iSeason + 2 THEN 3
+			WHEN Season = @iSeason + 3 THEN 4
+			ELSE NULL
+		END
+
+-- Check if #temp_pivot_already_counted_bonuses exists, if it does drop it
+IF OBJECT_ID('tempdb..#temp_pivot_already_counted_bonuses') IS NOT NULL
+	DROP TABLE #temp_pivot_already_counted_bonuses
+
+	SELECT ContractID
+		,ISNULL([1],0) AS season_1_already_counted_bonus
+		,ISNULL([2],0) AS season_2_already_counted_bonus
+		,ISNULL([3],0) AS season_3_already_counted_bonus
+		,ISNULL([4],0) AS season_4_already_counted_bonus
+	INTO #temp_pivot_already_counted_bonuses
+	FROM (
+	SELECT ContractID
+		,season_in_league
+		,amount_treated_as_signing_bonus
+	FROM #temp_already_counted_bonuses) up
+	PIVOT (MAX(amount_treated_as_signing_bonus) FOR season_in_league IN ([1],[2],[3],[4])) AS pvt
+	WHERE 1 = 1
+
+
+
+/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Find the yearly and total guarantees.
+
+OUTPUT TABLES:
+#temp_p5_rb_total_guarantees
+#temp_pivot_yearly_guarantees
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+  -- Check if #temp_p5_rb_total_guarantees exists, if it does drop it
+IF OBJECT_ID('tempdb..#temp_p5_rb_total_guarantees') IS NOT NULL
+	DROP TABLE #temp_p5_rb_total_guarantees
+
+	SELECT cg.ContractId
+		,SUM(CASE WHEN SectionType IN ('P5','Roster Bonus') THEN Guar_Max ELSE 0 END) AS guaranteed_p5_rb
+	INTO #temp_p5_rb_total_guarantees
+	FROM #temp_draft_contract_list cr
+	INNER JOIN ClubDB.dbo.CapGuarantee cg
+		ON cr.contract_id = cg.ContractID
+		AND cr.sign_date = cg.ChangeDate
+		AND cg.[Status] LIKE '%On Execution And Effective%'
+	INNER JOIN ClubDB.dbo.SectionYearRep se
+		ON cg.ContractID = se.ContractID
+		AND cg.SectionID = se.SectionID
+		AND cg.Season = se.Season
+	GROUP BY cg.ContractID
+
+
+
+-- Check if #temp_yearly_guarantees exists, if it does drop it
+IF OBJECT_ID('tempdb..#temp_yearly_guarantees') IS NOT NULL
+	DROP TABLE #temp_yearly_guarantees
+
+	SELECT cg.ContractId
+		,cg.Season
+		,CASE WHEN cg.Season = @iSeason THEN 1
+			WHEN cg.Season = @iSeason + 1 THEN 2
+			WHEN cg.Season = @iSeason + 2 THEN 3
+			WHEN cg.Season = @iSeason + 3 THEN 4
+			ELSE NULL
+		END AS season_in_league
+		,SUM(Guar_Max) AS guarantee_total_non_sb
+	INTO #temp_yearly_guarantees
+	FROM #temp_draft_contract_list cr
+	INNER JOIN ClubDB.dbo.CapGuarantee cg
+		ON cr.contract_id = cg.ContractID
+		AND cr.sign_date = cg.ChangeDate
+		AND cg.[Status] LIKE '%On Execution And Effective%'
+	INNER JOIN ClubDB.dbo.SectionYearRep se
+		ON cg.ContractID = se.ContractID
+		AND cg.SectionID = se.SectionID
+		AND cg.Season = se.Season
+	GROUP BY cg.ContractID
+		,cg.Season
+		,CASE WHEN cg.Season = @iSeason THEN 1
+			WHEN cg.Season = @iSeason + 1 THEN 2
+			WHEN cg.Season = @iSeason + 2 THEN 3
+			WHEN cg.Season = @iSeason + 3 THEN 4
+			ELSE NULL
+		END
+
+
+-- Check if #temp_pivot_yearly_guarantees exists, if it does drop it
+IF OBJECT_ID('tempdb..#temp_pivot_yearly_guarantees') IS NOT NULL
+	DROP TABLE #temp_pivot_yearly_guarantees
+
+	SELECT ContractID
+		,ISNULL([1],0) AS season_1_guarantee_total_non_sb
+		,ISNULL([2],0) AS season_2_guarantee_total_non_sb
+		,ISNULL([3],0) AS season_3_guarantee_total_non_sb
+		,ISNULL([4],0) AS season_4_guarantee_total_non_sb
+	INTO #temp_pivot_yearly_guarantees
+	FROM (
+	SELECT ContractID
+		,season_in_league
+		,guarantee_total_non_sb
+	FROM #temp_yearly_guarantees) up
+	PIVOT (MAX(guarantee_total_non_sb) FOR season_in_league IN ([1],[2],[3],[4])) AS pvt
+	WHERE 1 = 1
+
+
+
+/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Find and pivot the earn dates for first three seasons.
+
+OUTPUT TABLES:
+#temp_p5_rb_total_guarantees
+#temp_pivot_yearly_guarantees
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+-- Check if #temp_earn_dates exists, if it does drop it
+IF OBJECT_ID('tempdb..#temp_earn_dates') IS NOT NULL
+	DROP TABLE #temp_earn_dates
+
+	SELECT cr.contract_id
+		,se.Season
+		,CASE WHEN se.Season = @iSeason THEN 1
+			WHEN se.Season = @iSeason + 1 THEN 2
+			WHEN se.Season = @iSeason + 2 THEN 3
+			WHEN se.Season = @iSeason + 3 THEN 4
+			ELSE NULL
+		END AS season_in_league
+		,EventDescription
+	INTO #temp_earn_dates
+	FROM #temp_draft_contract_list cr
+	INNER JOIN ClubDB.dbo.SectionYearRep se
+		ON cr.contract_id = se.ContractID
+	INNER JOIN ClubDB.dbo.SectionYearEventRep ee
+		ON se.ContractID = ee.ContractID
+		AND se.SectionID = ee.SectionID
+	WHERE SectionType IN ('P5','Roster Bonus')
+
+
+-- Check if #temp_pivot_earn_dates exists, if it does drop it
+IF OBJECT_ID('tempdb..#temp_pivot_earn_dates') IS NOT NULL
+	DROP TABLE #temp_pivot_earn_dates
+
+	SELECT contract_id
+		,[1] AS season_1_earn_date
+		,[2] AS season_2_earn_date
+		,[3] AS season_3_earn_date
+		,[4] AS season_4_earn_date
+	INTO #temp_pivot_earn_dates
+	FROM (
+	SELECT contract_id
+		,season_in_league
+		,EventDescription
+	FROM #temp_earn_dates) up
+	PIVOT (MAX(EventDescription) FOR season_in_league IN ([1],[2],[3],[4])) AS pvt
+	WHERE 1 = 1
+
+
+/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
 Join the yearly salaries and year one cap hit to the contract list
 
 OUTPUT TABLES:
@@ -148,24 +438,56 @@ IF OBJECT_ID('tempdb..#temp_draft_contract_report') IS NOT NULL
 		--,nfl_player_id
 		,player
 		,position
+		,agent
 		--,contract_id
 		--,sign_date
 		--,first_season
-		,contract_years
+		--,contract_years
 		,signing_bonus
 		,season_1_salary
 		,season_2_salary
 		,season_3_salary
 		,season_4_salary
 		--,season_5_salary *commented out becasuse as of 10/2017 no rookie contracts have 5th years at signing
-		,NULL AS season_5_salary
+		--,NULL AS season_5_salary
 		,gross_total
 		,average_per_year
-		,CapAmt AS season_1_cap_amount
-		,ROUND((signing_bonus / 4 + season_1_salary)*0.25,0) AS increase_25_percent
-		,CASE WHEN season_2_salary >= season_1_salary + ROUND((signing_bonus / 4 + season_1_salary)*0.25,0) THEN 1 ELSE 0 END AS max_out_season_2
-		,CASE WHEN season_3_salary >= season_1_salary + ROUND((signing_bonus / 4 + season_1_salary)*0.25,0) * 2 THEN 1 ELSE 0 END AS max_out_season_3
-		,CASE WHEN season_4_salary >= season_1_salary + ROUND((signing_bonus / 4 + season_1_salary)*0.25,0) * 3 THEN 1 ELSE 0 END AS max_out_season_4
+		,cr.CapAmt AS season_1_cap_amount
+		,ROUND((cap_signing_bonus / 4 + season_1_salary)*0.25,0) AS increase_25_percent
+		,CASE WHEN season_2_salary + 1 >= season_1_salary + ROUND((cap_signing_bonus / 4 + season_1_salary)*0.25,0) * 1 THEN 1 ELSE 0 END AS max_out_season_2 --add 1 to account for rounding
+		,CASE WHEN season_3_salary + 2 >= season_1_salary + ROUND((cap_signing_bonus / 4 + season_1_salary)*0.25,0) * 2 THEN 1 ELSE 0 END AS max_out_season_3 --add 2 to account for rounding
+		,CASE WHEN season_4_salary + 3 >= season_1_salary + ROUND((cap_signing_bonus / 4 + season_1_salary)*0.25,0) * 3 THEN 1 ELSE 0 END AS max_out_season_4 --add 3 to account for rounding
+		,season_1_salary - season_1_minimum AS excess_season_1
+		,season_2_salary - season_2_minimum AS excess_season_2
+		,season_3_salary - season_3_minimum AS excess_season_3
+		,season_4_salary - season_4_minimum AS excess_season_4
+		,(season_1_salary - season_1_minimum) 
+			+ ((season_2_salary - ISNULL(season_2_already_counted_bonus,0)) - season_2_minimum) 
+			+ ((season_3_salary - ISNULL(season_3_already_counted_bonus,0)) - season_3_minimum) 
+			+ ((season_4_salary - ISNULL(season_4_already_counted_bonus,0)) - season_4_minimum) 
+		AS excess_total
+		,(yo.year_one_rookie_allocation - season_1_minimum) * 4 AS signing_bonus_expected
+		,(yo.year_one_rookie_allocation - season_1_minimum) * 4 - signing_bonus AS signing_bonus_shortage
+		,cap_signing_bonus + season_1_salary * 4 + ROUND((cap_signing_bonus / 4 + season_1_salary)*0.25,0) * 6 AS max_value_25_pct
+		,CASE WHEN ABS(gross_total - (cap_signing_bonus + season_1_salary *4 + ROUND((cap_signing_bonus / 4 + season_1_salary)*0.25,0) * 6)) <= 5 THEN 1 ELSE 0 END AS maxed_out_25_pct
+		,((season_2_salary - ISNULL(season_2_already_counted_bonus,0)) - season_1_salary) / (cap_signing_bonus / 4 + season_1_salary) AS season_2_increase_pct
+		,((season_3_salary - ISNULL(season_3_already_counted_bonus,0)) - (season_2_salary - ISNULL(season_2_already_counted_bonus,0))) / (cap_signing_bonus / 4 + season_1_salary) AS season_3_increase_pct
+		,((season_4_salary - ISNULL(season_4_already_counted_bonus,0)) - (season_3_salary - ISNULL(season_3_already_counted_bonus,0))) / (cap_signing_bonus / 4 + season_1_salary) AS season_4_increase_pct
+		,tg.guaranteed_p5_rb
+		,ISNULL(yg.season_1_guarantee_total_non_sb / season_1_salary,0) AS guarantee_pct_season_1
+		,ISNULL(yg.season_2_guarantee_total_non_sb / season_2_salary,0) AS guarantee_pct_season_2
+		,ISNULL(yg.season_3_guarantee_total_non_sb / season_3_salary,0) AS guarantee_pct_season_3
+		,ISNULL(yg.season_4_guarantee_total_non_sb / season_4_salary,0) AS guarantee_pct_season_4
+		,ed.season_1_earn_date
+		,ed.season_2_earn_date
+		,ed.season_3_earn_date
+		,ed.season_4_earn_date
+		,(season_2_salary) / (season_1_salary + ROUND((cap_signing_bonus / 4 + season_1_salary)*0.25,0) * 1) AS season_2_pct_of_max_yearly
+		,(season_3_salary) / (season_1_salary + ROUND((cap_signing_bonus / 4 + season_1_salary)*0.25,0) * 2) AS season_3_pct_of_max_yearly
+		,(season_4_salary) / (season_1_salary + ROUND((cap_signing_bonus / 4 + season_1_salary)*0.25,0) * 3) AS season_4_pct_of_max_yearly
+		,(signing_bonus + season_1_salary + season_2_salary) / (signing_bonus + season_1_salary * 2 + ROUND((cap_signing_bonus / 4 + season_1_salary)*0.25,0) * 1) AS season_2_pct_of_max_total
+		,(signing_bonus + season_1_salary + season_2_salary + season_3_salary) / (signing_bonus + season_1_salary * 3 + ROUND((cap_signing_bonus / 4 + season_1_salary)*0.25,0) * 3) AS season_3_pct_of_max_total
+		,(signing_bonus + season_1_salary + season_2_salary + season_3_salary + season_4_salary) / (signing_bonus + season_1_salary * 4 + ROUND((cap_signing_bonus / 4 + season_1_salary)*0.25,0) * 6) AS season_4_pct_of_max_total
 	INTO #temp_draft_contract_report
 	FROM #temp_draft_contract_list dc
 	INNER JOIN #temp_yearly_salary_pivot p5
@@ -174,7 +496,25 @@ IF OBJECT_ID('tempdb..#temp_draft_contract_report') IS NOT NULL
 		ON dc.nfl_player_id = cr.PlayerID
 		AND dc.sign_date = cr.FromDate
 		AND dc.first_season = cr.Season
+	LEFT JOIN #temp_yoras yo
+		ON dc.selection_overall = yo.draft_number
+		AND dc.first_season = yo.draft_year
+	LEFT JOIN #temp_pivot_yearly_minimums mi
+		ON dc.first_season = mi.first_season
+	LEFT JOIN #temp_cap_signing_bonuses bo
+		ON dc.nfl_player_id = bo.nfl_player_id
+	LEFT JOIN #temp_pivot_already_counted_bonuses ab
+		ON dc.contract_id = ab.ContractID
+	LEFT JOIN #temp_p5_rb_total_guarantees tg
+		ON dc.contract_id = tg.ContractID
+	LEFT JOIN #temp_pivot_yearly_guarantees yg
+		ON dc.contract_id = yg.ContractID
+	LEFT JOIN #temp_pivot_earn_dates ed
+		ON dc.contract_id = ed.contract_id
+
 
 	select *
-	from #temp_draft_contract_report	
-	ORDER BY selection_overall	
+	from #temp_draft_contract_report
+	ORDER BY selection_overall
+
+
