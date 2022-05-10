@@ -1,0 +1,180 @@
+
+
+
+/*********************************************************************************
+
+Program Name:	draft_contract_report
+Author:			Corey Krawiec
+Creation Date:	10/21/2017
+Description:       
+
+
+	This program is to create the list of draft contract details for Pat.
+	
+			
+Variables:
+	@iSeason
+	
+Modifications:
+Date         SE           Description
+
+**********************************************************************************/
+
+
+
+DECLARE @iSeason INT = 2020
+
+/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Create a list of all the contracts for the current draft class.
+
+OUTPUT TABLES:
+#temp_draft_contract_list
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+  -- Check if #temp_draft_contract_list exists, if it does drop it
+IF OBJECT_ID('tempdb..#temp_draft_contract_list') IS NOT NULL
+	DROP TABLE #temp_draft_contract_list
+
+	SELECT draft_round
+		,draft_pick AS selection_in_round
+		,draft_number AS selection_overall
+		,cl.code AS selection_team
+		,PlayerID AS nfl_player_id
+		,CONCAT(Player_LastName,', ',Player_FootballName) AS player
+		,CASE WHEN cr.Agent_LastName IS NULL THEN '' ELSE CONCAT(cr.Agent_LastName,', ',cr.Agent_FirstName) END AS agent
+		,translation AS position
+		,cr.ContractID AS contract_id
+		,SignDate AS sign_date
+		,FirstContractYear AS first_season
+		--,EffectiveLastContractYear - FirstContractYear + 1 AS contract_years
+		,4 AS contract_years
+		,TotalSigningBonus AS signing_bonus
+		,TotalPackageAmt AS gross_total
+		--,TotalPackageAmt / (EffectiveLastContractYear - FirstContractYear + 1) AS average_per_year
+		,TotalPackageAmt / 4 AS average_per_year
+	INTO #temp_draft_contract_list
+	FROM [ClubDB].[dbo].[ContractRep] cr
+	INNER JOIN BaneProductionAnalytics.dbo.players pl
+		ON cr.PlayerID = pl.nfl_id
+		AND pl.is_deleted = 0
+	INNER JOIN BaneProductionAnalytics.dbo.clubs cl
+		ON cr.ClubID = cl.nfl_club_id
+		AND cl.is_disabled = 0
+	LEFT JOIN BaneProductionAnalytics.dbo.positions po
+		ON pl.position_id = po.id
+	WHERE SigningType = 'Selection List Signing'
+		AND draft_year = @iSeason
+		AND draft_round IS NOT NULL
+		AND supplemental_draft_pick = 0
+
+
+/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Create a list of the cash salaries for the players in the above table.
+
+OUTPUT TABLES:
+#temp_cash_salary
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+  -- Check if #temp_cash_salary exists, if it does drop it
+IF OBJECT_ID('tempdb..#temp_cash_salary') IS NOT NULL
+	DROP TABLE #temp_cash_salary
+
+	SELECT PlayerID AS nfl_player_id
+		,ClubID AS nfl_club_id
+		,Season AS season
+		,Season - @iSeason + 1 AS season_in_league
+		,Cash - CashSB_SB AS annual_salary
+	INTO #temp_cash_salary 
+	FROM #temp_draft_contract_list cy
+	INNER JOIN ClubDB.dbo.CapRollup cr
+		ON cy.nfl_player_id = cr.PlayerID
+		AND cy.sign_date = cr.FromDate
+
+
+
+/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Pivot the yearly salaries for the years in the above table.
+
+For the purposes of this program, it is for the first 5 seasons of the contract.
+
+OUTPUT TABLES:
+#temp_yearly_salary_pivot
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+  -- Check if #temp_yearly_salary_pivot exists, if it does drop it
+IF OBJECT_ID('tempdb..#temp_yearly_salary_pivot') IS NOT NULL
+	DROP TABLE #temp_yearly_salary_pivot
+
+	SELECT nfl_player_id
+		,nfl_club_id
+		,[1] AS season_1_salary
+		,[2] AS season_2_salary
+		,[3] AS season_3_salary
+		,[4] AS season_4_salary
+		,[5] AS season_5_salary
+	INTO #temp_yearly_salary_pivot
+	FROM (
+	SELECT nfl_player_id
+		,nfl_club_id
+		,season_in_league
+		,annual_salary
+	FROM #temp_cash_salary WHERE season_in_league IN (1,2,3,4,5)) up
+	PIVOT (MAX(annual_salary) FOR season_in_league IN ([1], [2], [3], [4], [5])) AS pvt
+
+
+/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Join the yearly salaries and year one cap hit to the contract list
+
+OUTPUT TABLES:
+#temp_draft_contract_report
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+  -- Check if#temp_draft_contract_report exists, if it does drop it
+IF OBJECT_ID('tempdb..#temp_draft_contract_report') IS NOT NULL
+	DROP TABLE #temp_draft_contract_report
+
+	SELECT draft_round
+		,selection_in_round
+		,selection_overall
+		,selection_team
+		--,nfl_player_id
+		,player
+		,position
+		--,contract_id
+		--,sign_date
+		--,first_season
+		,contract_years
+		,signing_bonus
+		,season_1_salary
+		,season_2_salary
+		,season_3_salary
+		,season_4_salary
+		--,season_5_salary *commented out becasuse as of 10/2017 no rookie contracts have 5th years at signing
+		,NULL AS season_5_salary
+		,gross_total
+		,average_per_year
+		,CapAmt AS season_1_cap_amount
+		,ROUND((signing_bonus / 4 + season_1_salary)*0.25,0) AS increase_25_percent
+		,CASE WHEN season_2_salary >= season_1_salary + ROUND((signing_bonus / 4 + season_1_salary)*0.25,0) THEN 1 ELSE 0 END AS max_out_season_2
+		,CASE WHEN season_3_salary >= season_1_salary + ROUND((signing_bonus / 4 + season_1_salary)*0.25,0) * 2 THEN 1 ELSE 0 END AS max_out_season_3
+		,CASE WHEN season_4_salary >= season_1_salary + ROUND((signing_bonus / 4 + season_1_salary)*0.25,0) * 3 THEN 1 ELSE 0 END AS max_out_season_4
+	INTO #temp_draft_contract_report
+	FROM #temp_draft_contract_list dc
+	INNER JOIN #temp_yearly_salary_pivot p5
+		ON dc.nfl_player_id = p5.nfl_player_id
+	INNER JOIN ClubDB.dbo.CapRollup cr
+		ON dc.nfl_player_id = cr.PlayerID
+		AND dc.sign_date = cr.FromDate
+		AND dc.first_season = cr.Season
+
+	select *
+	from #temp_draft_contract_report	
+	ORDER BY selection_overall	
