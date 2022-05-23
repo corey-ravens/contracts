@@ -1,0 +1,74 @@
+/****** Script for SelectTopNRows command from SSMS  ******/
+SELECT C.Club_Code [CLUB], C.Season [SEASON], 
+
+	   [Points Allowed by Defense].Stat [Stat],
+	   [Points Allowed by Defense].div_rank [Div Rank],
+	   [Points Allowed by Defense].conf_rank [Conf Rank],
+	   [Points Allowed by Defense].league_rank [League Rank],
+
+	   [Total Defense (Net Yards)].Stat [Stat],
+	   [Total Defense (Net Yards)].div_rank [Div Rank],
+	   [Total Defense (Net Yards)].conf_rank [Conf Rank],
+	   [Total Defense (Net Yards)].league_rank [League Rank],
+
+	   [Average Net Yards Given Up per Passing Play].Stat [Stat],
+	   [Average Net Yards Given Up per Passing Play].div_rank [Div Rank],
+	   [Average Net Yards Given Up per Passing Play].conf_rank [Conf Rank],
+	   [Average Net Yards Given Up per Passing Play].league_rank [League Rank],
+
+	   [Interceptions].Stat [Stat],
+	   [Interceptions].div_rank [Div Rank],
+	   [Interceptions].conf_rank [Conf Rank],
+	   [Interceptions].league_rank [League Rank],
+
+	   [Wins].Stat [Stat],
+	   [Wins].div_rank [Div Rank],
+	   [Wins].conf_rank [Conf Rank],
+	   [Wins].league_rank [League Rank],
+
+	   [Touchdowns on Returns & Recoveries].Stat [Stat],
+	   [Touchdowns on Returns & Recoveries].div_rank [Div Rank],
+	   [Touchdowns on Returns & Recoveries].conf_rank [Conf Rank],
+	   [Touchdowns on Returns & Recoveries].league_rank [League Rank],
+
+	   [Net Diff. takeaway/giveaway].Stat [Stat],
+	   [Net Diff. takeaway/giveaway].div_rank [Div Rank],
+	   [Net Diff. takeaway/giveaway].conf_rank [Conf Rank],
+	   [Net Diff. takeaway/giveaway].league_rank [League Rank],
+
+	   [Touchdowns Allowed by Defense].Stat [Stat],
+	   [Touchdowns Allowed by Defense].div_rank [Div Rank],
+	   [Touchdowns Allowed by Defense].conf_rank [Conf Rank],
+	   [Touchdowns Allowed by Defense].league_rank [League Rank]
+
+  FROM ClubDB.dbo.Club C
+  LEFT JOIN [ClubDB].[dbo].[TeamRankings] as [Points Allowed by Defense]
+    ON C.ClubKey = [Points Allowed by Defense].ClubKey
+   AND [Points Allowed by Defense].Stat = 'Points Allowed by Defense'
+  LEFT JOIN [ClubDB].[dbo].[TeamRankings] as [Total Defense (Net Yards)]
+    ON C.ClubKey = [Total Defense (Net Yards)].ClubKey
+   AND [Total Defense (Net Yards)].Stat = 'Total Defense (Net Yards)'
+  LEFT JOIN [ClubDB].[dbo].[TeamRankings] as [Average Net Yards Given Up per Passing Play]
+    ON C.ClubKey = [Average Net Yards Given Up per Passing Play].ClubKey
+   AND [Average Net Yards Given Up per Passing Play].Stat = 'Average Net Yards Given Up per Passing Play'
+  LEFT JOIN [ClubDB].[dbo].[TeamRankings] as [Interceptions]
+    ON C.ClubKey = [Interceptions].ClubKey
+   AND [Interceptions].Stat = 'Interceptions'
+  LEFT JOIN [ClubDB].[dbo].[TeamRankings] as [Wins]
+    ON C.ClubKey = [Wins].ClubKey
+   AND [Wins].Stat = 'Wins'
+  LEFT JOIN [ClubDB].[dbo].[TeamRankings] as [Touchdowns on Returns & Recoveries]
+    ON C.ClubKey = [Touchdowns on Returns & Recoveries].ClubKey
+   AND [Touchdowns on Returns & Recoveries].Stat = 'Touchdowns on Returns & Recoveries'
+  LEFT JOIN [ClubDB].[dbo].[TeamRankings] as [Net Diff. takeaway/giveaway]
+    ON C.ClubKey = [Net Diff. takeaway/giveaway].ClubKey
+   AND [Net Diff. takeaway/giveaway].Stat = 'Net Diff. takeaway/giveaway'
+  LEFT JOIN [ClubDB].[dbo].[TeamRankings] as [Touchdowns Allowed by Defense]
+    ON C.ClubKey = [Touchdowns Allowed by Defense].ClubKey
+   AND [Touchdowns Allowed by Defense].Stat = 'Touchdowns Allowed by Defense'
+ WHERE C.Club_Code = 'BLT'
+   AND C.Season = 2020
+
+
+SELECT * FROM ClubDB.dbo.TeamRankings WHERE Stat Like '%points allowed by def%'
+ 
