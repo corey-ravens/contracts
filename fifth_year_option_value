@@ -1,0 +1,116 @@
+
+
+
+
+
+/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	(8)
+
+
+	Create a table with the nfl salary cap figures so you can get cap/cash numbers as a percent of the cap.
+
+	OUTPUT TABLES:
+	#temp_nfl_salary_cap
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_nfl_salary_cap exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_nfl_salary_cap') IS NOT NULL
+		DROP TABLE #temp_nfl_salary_cap
+
+	SELECT DISTINCT season
+			,nfl_salary_cap
+	INTO #temp_nfl_salary_cap
+	FROM analysis_teams_salary_cap
+	WHERE created_date = (SELECT MAX(created_date) FROM analysis_teams_salary_cap)
+
+
+
+/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Create a table of all "second contracts."  They aren't all necessarily a second contract, they are the first contract a player signs when he
+can become a UFA.
+
+OUTPUT TABLES:
+#temp_actual_second_contracts
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+-- Check if #temp_actual_second_contracts exists, if it does drop it
+IF OBJECT_ID('tempdb..#temp_actual_second_contracts') IS NOT NULL
+	DROP TABLE #temp_actual_second_contracts
+
+	SELECT nfl_player_id
+		,player
+		,signing_type
+		,first_contract_year
+		,true_years
+		,total_years
+		,true_average_per_year
+		,total_average_per_year
+		,true_apy_percent_of_cap
+		,RANK() OVER (PARTITION BY nfl_player_id ORDER BY signing_date, nfl_contract_id) AS non_rookie_contract_number
+	INTO #temp_actual_second_contracts
+	FROM Analytics.dbo.analysis_players_contracts co
+	WHERE signing_type IN ('Franchise Player Signing','Transition Player Signing','Renegotiation','UFA-S','UFA-D','Extension','FA-S','FA-D')
+		AND nfl_contract_id <> 231314 --Clowney fifth year option was negotiated to be higher cause of the position difference
+	ORDER BY true_apy_percent_of_cap desc
+
+
+
+	SELECT nfl_id AS nfl_player_id
+		,CONCAT(last_name,', ',goes_by) AS player
+		,draft_year
+		,draft_number
+		,po.translation AS pos
+		,cr.ContractID AS nfl_contract_id
+		,cd.Season AS season
+		,cd.CapAmount AS fifth_year_option_amount
+		,ca.nfl_salary_cap
+		,cd.CapAmount / CAST(nfl_salary_cap AS FLOAT) AS fifth_year_option_pct
+		,sc.first_contract_year
+		,sc.true_apy_percent_of_cap
+		,CASE WHEN poc.bane_player_id IS NULL THEN 0 
+			ELSE poc.pct_of_cap
+		END AS pct_of_cap
+		,poc.pct_of_cap_type
+		,CASE WHEN cr.ContractID IS NULL THEN 0
+			WHEN signing_type = 'FA-D' AND sc.first_contract_year <= pl.draft_year + 4 THEN 0
+			--WHEN sc.first_contract_year <= pl.draft_year + 4 THEN NULL
+			WHEN poc.pct_of_cap IS NOT NULL THEN poc.pct_of_cap - (cd.CapAmount / nfl_salary_cap)
+			ELSE NULL
+		END AS option_value
+	--INTO #temp_fifth_year_option
+	FROM BaneProductionAnalytics.dbo.players pl
+	LEFT JOIN ProDB.dbo.TransactionTable tt
+		ON pl.nfl_id = tt.PlayerID
+		AND tt.Season <= pl.draft_year + 4
+		AND tt.TransactionDesc = 'Option Exercised'
+	LEFT JOIN ClubDB.dbo.CapDetails cd
+		ON tt.PlayerID = cd.PlayerID
+		AND tt.Transactiondate = cd.FromDate
+		AND cd.Category = 'Para 5'
+		AND cd.Season <= pl.draft_year + 4
+	LEFT JOIN ClubDB.dbo.ContractRep cr
+		ON cd.PlayerID = cr.PlayerID
+		AND cr.SigningType = 'Selection List Signing'
+	LEFT JOIN BaneProductionAnalytics.dbo.positions po
+		ON pl.position_id = po.id
+	LEFT JOIN #temp_actual_second_contracts sc
+		ON pl.nfl_id = sc.nfl_player_id
+		AND sc.non_rookie_contract_number = 1
+	LEFT JOIN #temp_nfl_salary_cap ca
+		ON cd.season = ca.season
+	LEFT JOIN Analytics.dbo.r_input_draft_model_pct_of_cap poc
+		ON pl.id = poc.bane_player_id
+	WHERE pl.is_deleted = 0
+		AND draft_round = 1
+		AND draft_year >= 2011
+		AND draft_year <= 2016
+	ORDER BY draft_number
+		,draft_year
+
+
+
+
